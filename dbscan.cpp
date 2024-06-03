@@ -1,36 +1,31 @@
 #include "dbscan.hpp"
-
 #include <cstddef>
 #include <nanoflann/nanoflann.hpp>
-
 #include <type_traits>
 #include <vector>
+#include <algorithm>
 
-// And this is the "dataset to kd-tree" adaptor class:
-
-inline auto get_pt(const point2& p, std::size_t dim)
+// Helper function to get the coordinate of a 2D point given the dimension (0 for x, 1 for y)
+inline float get_pt(const Point2& p, std::size_t dim)
 {
-    if(dim == 0) return p.x;
+    if (dim == 0) return p.x;
     return p.y;
 }
 
-
-inline auto get_pt(const point3& p, std::size_t dim)
+// Helper function to get the coordinate of a 3D point given the dimension (0 for x, 1 for y, 2 for z)
+inline float get_pt(const Point3& p, std::size_t dim)
 {
-    if(dim == 0) return p.x;
-    if(dim == 1) return p.y;
+    if (dim == 0) return p.x;
+    if (dim == 1) return p.y;
     return p.z;
 }
 
-
+// Adaptor class for interfacing with the KD-tree implementation
 template<typename Point>
-struct adaptor
+struct Adaptor
 {
-    const std::span<const Point>&  points;
-    adaptor(const std::span<const Point>&  points) : points(points) { }
-
-    /// CRTP helper method
-    //inline const Derived& derived() const { return obj; }
+    const std::span<const Point>& points;
+    Adaptor(const std::span<const Point>& points) : points(points) {}
 
     // Must return the number of data points
     inline std::size_t kdtree_get_point_count() const { return points.size(); }
@@ -49,56 +44,61 @@ struct adaptor
     template <class BBOX>
     bool kdtree_get_bbox(BBOX& /*bb*/) const { return false; }
 
+    // Return a pointer to the x coordinate of the idx'th point
     auto const * elem_ptr(const std::size_t idx) const
     {
         return &points[idx].x;
     }
 };
 
-
-
-auto sort_clusters(std::vector<std::vector<size_t>>& clusters)
+// Function to sort clusters by their point indices
+void sort_clusters(std::vector<std::vector<size_t>>& clusters)
 {
-    for(auto& cluster: clusters)
+    for (auto& cluster : clusters)
     {
         std::sort(cluster.begin(), cluster.end());
     }
 }
 
-
 template<int n_cols, typename Adaptor>
-auto dbscan(const Adaptor& adapt, float eps, int min_pts)
+std::vector<std::vector<size_t>> dbscan_impl(const Adaptor& adapt, float eps, int min_pts)
 {
+    // Squaring epsilon for distance comparison
     eps *= eps;
+    
     using namespace nanoflann;
-    using  my_kd_tree_t = KDTreeSingleIndexAdaptor<L2_Simple_Adaptor<float, decltype(adapt)>, decltype(adapt), n_cols>;
+    using my_kd_tree_t = KDTreeSingleIndexAdaptor<L2_Simple_Adaptor<float, Adaptor>, Adaptor, n_cols>;
 
+    // Building the KD-tree index
     auto index = my_kd_tree_t(n_cols, adapt, KDTreeSingleIndexAdaptorParams(10));
     index.buildIndex();
 
     const auto n_points = adapt.kdtree_get_point_count();
-    auto visited  = std::vector<bool>(n_points);
+    auto visited = std::vector<bool>(n_points);
     auto clusters = std::vector<std::vector<size_t>>();
-    auto matches  = std::vector<std::pair<size_t, float>>();
+    auto matches = std::vector<std::pair<size_t, float>>();
     auto sub_matches = std::vector<std::pair<size_t, float>>();
 
-    for(size_t i = 0; i < n_points; i++)
+    for (size_t i = 0; i < n_points; i++)
     {
         if (visited[i]) continue;
 
+        // Radius search for neighbors within epsilon distance
         index.radiusSearch(adapt.elem_ptr(i), eps, matches, SearchParams(32, 0.f, false));
         if (matches.size() < static_cast<size_t>(min_pts)) continue;
         visited[i] = true;
 
+        // Creating a new cluster and adding the core point
         auto cluster = std::vector({i});
 
-        while (matches.empty() == false)
+        while (!matches.empty())
         {
             auto nb_idx = matches.back().first;
             matches.pop_back();
             if (visited[nb_idx]) continue;
             visited[nb_idx] = true;
 
+            // Radius search for neighbors of the neighbor
             index.radiusSearch(adapt.elem_ptr(nb_idx), eps, sub_matches, SearchParams(32, 0.f, false));
 
             if (sub_matches.size() >= static_cast<size_t>(min_pts))
@@ -113,18 +113,21 @@ auto dbscan(const Adaptor& adapt, float eps, int min_pts)
     return clusters;
 }
 
+// DBSCAN class constructor
+DBSCAN::DBSCAN(float eps, int min_pts)
+    : eps_(eps), min_pts_(min_pts)
+{}
 
-auto dbscan(const std::span<const point2>& data, float eps, int min_pts) -> std::vector<std::vector<size_t>>
+// DBSCAN run method for 2D points
+std::vector<std::vector<size_t>> DBSCAN::run(const std::span<const Point2>& data)
 {
-    const auto adapt = adaptor<point2>(data);
-
-    return dbscan<2>(adapt, eps, min_pts);
+    const auto adapt = Adaptor<Point2>(data);
+    return dbscan_impl<2>(adapt, eps_, min_pts_);
 }
 
-
-auto dbscan(const std::span<const point3>& data, float eps, int min_pts) -> std::vector<std::vector<size_t>>
+// DBSCAN run method for 3D points
+std::vector<std::vector<size_t>> DBSCAN::run(const std::span<const Point3>& data)
 {
-    const auto adapt = adaptor<point3>(data);
-
-    return dbscan<3>(adapt, eps, min_pts);
+    const auto adapt = Adaptor<Point3>(data);
+    return dbscan_impl<3>(adapt, eps_, min_pts_);
 }
